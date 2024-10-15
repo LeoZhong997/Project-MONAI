@@ -1,19 +1,36 @@
+import hashlib
+import json
+import shutil
 import sys
+import tarfile
 import tempfile
 import os
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
+from urllib.error import URLError, ContentTooShortError, HTTPError
+from urllib.parse import urlparse
+from urllib.request import urlopen, urlretrieve
+import zipfile
 
 from BaseProjects.config.type_definitions import PathLike
+from BaseProjects.utils.module import look_up_option, optional_import
+
+gdown, has_gdown = optional_import("gdown", "4.7.3")
 
 DEFAULT_FMT = "%(asctime)s - %(levelname)s - %(message)s"
+SUPPORTED_HASH_TYPES = {
+    "md5": hashlib.md5,
+    "sha1": hashlib.sha1,
+    "sha256": hashlib.sha256,
+    "sha512": hashlib.sha512,
+}
 
 def get_logger(
     module_name: str = "default.apps",
     fmt: str = DEFAULT_FMT,
-    datefmt: str | None = None,
-    logger_handler: logging.Handler | None = None,
+    datefmt: Union[str, None] = None,
+    logger_handler: Union[logging.Handler, None] = None,
 ) -> logging.Logger:
     """
     Get a `module_name` logger with the specified format and date format.
@@ -49,7 +66,7 @@ def _basename(p: PathLike):
     return Path(f"{p}".rstrip(sep)).name
 
 
-def check_hash(filepath: PathLike, val: str | None = None, hash_type: str = "md5"):
+def check_hash(filepath: PathLike, val: Union[str, None] = None, hash_type: str = "md5"):
     """
     Verify hash signature of specified file.
 
@@ -63,12 +80,44 @@ def check_hash(filepath: PathLike, val: str | None = None, hash_type: str = "md5
     if val is None:
         logger.info(f"Excepted {hash_type} is None, skip {hash_type} check for file {filepath}.")
         return True
+    actual_hash_func = look_up_option(hash_type, SUPPORTED_HASH_TYPES)
+
+    if sys.version_info > (3, 9):
+        actual_hash = actual_hash_func(usedforsecurity=False)
+    else:
+        actual_hash = actual_hash_func()
+    
+    try:
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                actual_hash.update(chunk)
+    except Exception as e:
+        logger.error("Exception in check_hash: {e}")
+        return False
+    if val != actual_hash.hexdigest():
+        logger.error(f"check_hash failed {actual_hash.hexdigest()}.")
+        return False
+    
+    logger.info(f"Verified '{_basename(filepath)}', {hash_type}: {val}.")
+    return True
+
+
+def _download_with_progress(url: str, filepath: Path, progress: bool=True):
+    """
+    Retrieve file from `url` to `filepath`, optionally showing a progress bar.
+    """
+    try:
+        urlretrieve(url, filepath)
+    except (URLError, ContentTooShortError, HTTPError) as e:
+        logger.error(f"Download failed from {url} to {filepath}.")
+        raise e
+
 
 
 def download_url(
     url: str,
     filepath: PathLike = "",
-    hash_val: str | None = None,
+    hash_val: Union[str, None] = None,
     hash_type: str = "md5",
     progress: bool = True,
     **gdown_kwargs: Any,
@@ -110,12 +159,50 @@ def download_url(
             raise RuntimeError(
                 f"{hash_type} check of existing file failed: filepath={filepath}, excepted {hash_type}={hash_val}"
             )
+        logger.info(f"File exists: {filepath}, skipped downloading.")
+        return 
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_name = Path(tmp_dir, _basename(filepath))
+            if urlparse(url).netloc == "drive.google.com":
+                if not has_gdown:
+                    raise RuntimeError("To download files from Google Drive, please install the gdown dependency.")
+                if "fuzzy" not in gdown_kwargs:
+                    gdown_kwargs["fuzzy"] = True
+                gdown.download(url, f"{tmp_name}", quite=not progress, **gdown_kwargs)
+            elif urlparse(url).netloc == "drive.google.com":
+                with urlopen(url) as response:
+                    code = response.getcode()
+                    if code == 200:
+                        download_url = json.load(response)["href"]
+                        _download_with_progress(download_url, tmp_name, progress)
+                    else:
+                        raise RuntimeError(
+                            f"Download of file from {download_url}, received from {url} "
+                            + f"to {filepath} failed due to network issue or denied permission."
+                        )
+            else:
+                _download_with_progress(url, tmp_name, progress)
+            if not tmp_name.exists():
+                raise RuntimeError(f"Download of file from {url} to {filepath} failed due to network issue or denied permission.")
+            filedir = filepath.parent
+            if filedir:
+                os.makedirs(filedir, exist_ok=True)
+            shutil.move(f"{tmp_name}", f"{filepath}")
+    except (PermissionError, NotADirectoryError):
+        pass
 
+    logger.info(f"Download: {filepath}")
+    if not check_hash(filepath, hash_val, hash_type):
+        raise RuntimeError(
+            f"{hash_type} check of downloaded file failed: URL={url}."
+        )
+        
 
 def extractall(
     filepath: PathLike,
     output_dir: PathLike = ".",
-    hash_val: str | None = None,
+    hash_val: Union[str, None] = None,
     hash_type: str = "md5",
     file_type: str = "",
     has_base: bool = True,
@@ -140,14 +227,41 @@ def extractall(
         RuntimeError: When the hash validation of the ``filepath`` compressed file fails.
         NotImplementedError: When the ``filepath`` file extension is not one of [zip", "tar.gz", "tar"].
     """
-    pass
+    
+    if has_base:
+        cache_dir = Path(output_dir, _basename(filepath).split(".")[0])
+    else:
+        cache_dir = Path(output_dir)
+    if cache_dir.exists() and next(cache_dir.iterdir(), None) is not None:
+        logger.info(f"Non-empty folder exists in {cache_dir}, skipped extracting.")
+        return 
+    
+    filepath = Path(filepath)
+    if hash_val and not check_hash(filepath, hash_val, hash_type):
+        raise RuntimeError(f"{hash_type} check of compressed file failed: " 
+        f"filepath={filepath}, expected {hash_type}={hash_val}")
+    logger.info(f"Writing into directory: {output_dir}")
+    _file_type = file_type.lower().strip()
+    if filepath.name.endswith("zip") or _file_type == "zip":
+        zip_file = zipfile.ZipFile(filepath)
+        zip_file.extractall(output_dir)
+        zip_file.close()
+        return
+    if filepath.name.endswith("tar") or filepath.name.endswith("tar.gz") or "tar" in _file_type:
+        tar_file = tarfile.open(filepath)
+        tar_file.extractall(output_dir)
+        tar_file.close()
+        return
+    raise NotImplementedError(
+        f"Unsupported file type, available options are: ['zip', 'tar.gz', 'tar']. name={filepath}, type={file_type}."
+    )
 
 
 def download_and_extract(
     url: str,
     filepath: PathLike = "",
     output_dir: PathLike = ".",
-    hash_val: str | None = None,
+    hash_val: Union[str, None] = None,
     hash_type: str = "md5",
     file_type: str = "",
     has_base: bool = True,
@@ -178,7 +292,33 @@ def download_and_extract(
         extractall(filepath=filename, output_dir=output_dir, file_type=file_type, has_base=has_base)
 
 
-if __name__ == "__main__":
-    download_and_extract(
+def get_hash_val(filepath, hash_type):
+    actual_hash_func = look_up_option(hash_type, SUPPORTED_HASH_TYPES)
 
-    )
+    if sys.version_info > (3, 9):
+        actual_hash = actual_hash_func(usedforsecurity=False)
+    else:
+        actual_hash = actual_hash_func()
+
+    try:
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                actual_hash.update(chunk)
+    except Exception as e:
+        logger.error("Exception in check_hash: {e}")
+        return False
+    return actual_hash.hexdigest()
+
+
+if __name__ == "__main__":
+    root_dir = "/data/result/zhongzhiqiang/MONAI/debug/download_test"
+    os.makedirs(root_dir, exist_ok=True)
+    resource = "https://mirrors.tuna.tsinghua.edu.cn/github-release/git-for-windows/git/LatestRelease/MinGit-2.47.0-64-bit.zip"
+    md5 = "e1312f449e17c9aac237e1ceeb50fad6"
+
+    compressed_file = os.path.join(root_dir, "MinGit-2.47.0-64-bit.zip")
+    # file_md5 = get_hash_val(compressed_file, "md5")
+    # print(f"file_md5: {file_md5}")
+    data_dir = os.path.join(root_dir, "MinGit")
+    if not os.path.exists(data_dir):
+        download_and_extract(resource, compressed_file, data_dir, md5)
