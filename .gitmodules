@@ -1,0 +1,12 @@
+[submodule "MetricsReloaded"]
+	path = MetricsReloaded
+	url = https://github.com/Project-MONAI/MetricsReloaded
+[submodule "segment-anything"]
+	path = segment-anything
+	url = https://github.com/facebookresearch/segment-anything.git
+[submodule "MONAI"]
+	path = MONAI
+	url = https://github.com/Project-MONAI/MONAI.git
+[submodule "tutorials"]
+	path = tutorials
+	url = https://github.com/Project-MONAI/tutorials.git
