@@ -3,10 +3,10 @@
 	url = https://github.com/Project-MONAI/MetricsReloaded
 [submodule "segment-anything"]
 	path = segment-anything
-	url = https://github.com/facebookresearch/segment-anything.git
+	url = https://github.com/facebookresearch/segment-anything
 [submodule "MONAI"]
 	path = MONAI
-	url = https://github.com/Project-MONAI/MONAI.git
+	url = https://github.com/Project-MONAI/MONAI
 [submodule "tutorials"]
 	path = tutorials
-	url = https://github.com/Project-MONAI/tutorials.git
+	url = https://github.com/Project-MONAI/tutorials
