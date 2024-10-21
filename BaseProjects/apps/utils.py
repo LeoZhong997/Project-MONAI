@@ -26,19 +26,32 @@ SUPPORTED_HASH_TYPES = {
     "sha512": hashlib.sha512,
 }
 
+
 def get_logger(
-    module_name: str = "default.apps",
-    fmt: str = DEFAULT_FMT,
-    datefmt: Union[str, None] = None,
-    logger_handler: Union[logging.Handler, None] = None,
+        module_name: str = "default.apps",
+        fmt: str = DEFAULT_FMT,
+        datefmt: Union[str, None] = None,
+        logger_handler: Union[logging.Handler, None] = None,
 ) -> logging.Logger:
     """
     Get a `module_name` logger with the specified format and date format.
+
     By default, the logger will print to `stdout` at the INFO level.
     If `module_name` is `None`, return the root logger.
-    `fmt` and `datafmt` are passed to a `logging.Formatter` object
-    (https://docs.python.org/3/library/logging.html#formatter-objects).
-    `logger_handler` can be used to add an additional handler.
+
+    Parameters:
+    module_name (str): The name of the module to associate with the logger.
+        Default is "default.apps".
+    fmt (str): The format string for the logger messages.
+        Default is DEFAULT_FMT.
+    datefmt (str or None): The date format string for the logger messages.
+        Default is None.
+    logger_handler (logging.Handler or None): An additional handler to add to the logger.
+        Default is None.
+
+    Returns:
+    logging.Logger: The configured logger.
+
     """
     adds_stdout_handler = module_name is not None and module_name not in logging.root.manager.loggerDict
     logger = logging.getLogger(module_name)
@@ -52,6 +65,7 @@ def get_logger(
     if logger_handler is not None:
         logger.addHandler(logger_handler)
     return logger
+
 
 logger = get_logger("default.apps")
 
@@ -86,7 +100,7 @@ def check_hash(filepath: PathLike, val: Union[str, None] = None, hash_type: str 
         actual_hash = actual_hash_func(usedforsecurity=False)
     else:
         actual_hash = actual_hash_func()
-    
+
     try:
         with open(filepath, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -97,12 +111,12 @@ def check_hash(filepath: PathLike, val: Union[str, None] = None, hash_type: str 
     if val != actual_hash.hexdigest():
         logger.error(f"check_hash failed {actual_hash.hexdigest()}.")
         return False
-    
+
     logger.info(f"Verified '{_basename(filepath)}', {hash_type}: {val}.")
     return True
 
 
-def _download_with_progress(url: str, filepath: Path, progress: bool=True):
+def _download_with_progress(url: str, filepath: Path, progress: bool = True):
     """
     Retrieve file from `url` to `filepath`, optionally showing a progress bar.
     """
@@ -113,14 +127,13 @@ def _download_with_progress(url: str, filepath: Path, progress: bool=True):
         raise e
 
 
-
 def download_url(
-    url: str,
-    filepath: PathLike = "",
-    hash_val: Union[str, None] = None,
-    hash_type: str = "md5",
-    progress: bool = True,
-    **gdown_kwargs: Any,
+        url: str,
+        filepath: PathLike = "",
+        hash_val: Union[str, None] = None,
+        hash_type: str = "md5",
+        progress: bool = True,
+        **gdown_kwargs: Any,
 ):
     """
     Download file from specified URL link, support process bar and hash check.
@@ -160,7 +173,7 @@ def download_url(
                 f"{hash_type} check of existing file failed: filepath={filepath}, excepted {hash_type}={hash_val}"
             )
         logger.info(f"File exists: {filepath}, skipped downloading.")
-        return 
+        return
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_name = Path(tmp_dir, _basename(filepath))
@@ -170,21 +183,22 @@ def download_url(
                 if "fuzzy" not in gdown_kwargs:
                     gdown_kwargs["fuzzy"] = True
                 gdown.download(url, f"{tmp_name}", quite=not progress, **gdown_kwargs)
-            elif urlparse(url).netloc == "drive.google.com":
+            elif urlparse(url).netloc == "cloud-api.yandex.net":
                 with urlopen(url) as response:
                     code = response.getcode()
                     if code == 200:
-                        download_url = json.load(response)["href"]
-                        _download_with_progress(download_url, tmp_name, progress)
+                        _download_url = json.load(response)["href"]
+                        _download_with_progress(_download_url, tmp_name, progress)
                     else:
                         raise RuntimeError(
-                            f"Download of file from {download_url}, received from {url} "
+                            f"Error code {code}, received from {url} "
                             + f"to {filepath} failed due to network issue or denied permission."
                         )
             else:
                 _download_with_progress(url, tmp_name, progress)
             if not tmp_name.exists():
-                raise RuntimeError(f"Download of file from {url} to {filepath} failed due to network issue or denied permission.")
+                raise RuntimeError(
+                    f"Download of file from {url} to {filepath} failed due to network issue or denied permission.")
             filedir = filepath.parent
             if filedir:
                 os.makedirs(filedir, exist_ok=True)
@@ -197,15 +211,15 @@ def download_url(
         raise RuntimeError(
             f"{hash_type} check of downloaded file failed: URL={url}."
         )
-        
+
 
 def extractall(
-    filepath: PathLike,
-    output_dir: PathLike = ".",
-    hash_val: Union[str, None] = None,
-    hash_type: str = "md5",
-    file_type: str = "",
-    has_base: bool = True,
+        filepath: PathLike,
+        output_dir: PathLike = ".",
+        hash_val: Union[str, None] = None,
+        hash_type: str = "md5",
+        file_type: str = "",
+        has_base: bool = True,
 ):
     """
     Extract file to the output directory.
@@ -227,19 +241,19 @@ def extractall(
         RuntimeError: When the hash validation of the ``filepath`` compressed file fails.
         NotImplementedError: When the ``filepath`` file extension is not one of [zip", "tar.gz", "tar"].
     """
-    
+
     if has_base:
         cache_dir = Path(output_dir, _basename(filepath).split(".")[0])
     else:
         cache_dir = Path(output_dir)
     if cache_dir.exists() and next(cache_dir.iterdir(), None) is not None:
         logger.info(f"Non-empty folder exists in {cache_dir}, skipped extracting.")
-        return 
-    
+        return
+
     filepath = Path(filepath)
     if hash_val and not check_hash(filepath, hash_val, hash_type):
-        raise RuntimeError(f"{hash_type} check of compressed file failed: " 
-        f"filepath={filepath}, expected {hash_type}={hash_val}")
+        raise RuntimeError(f"{hash_type} check of compressed file failed: "
+                           f"filepath={filepath}, expected {hash_type}={hash_val}")
     logger.info(f"Writing into directory: {output_dir}")
     _file_type = file_type.lower().strip()
     if filepath.name.endswith("zip") or _file_type == "zip":
@@ -258,14 +272,14 @@ def extractall(
 
 
 def download_and_extract(
-    url: str,
-    filepath: PathLike = "",
-    output_dir: PathLike = ".",
-    hash_val: Union[str, None] = None,
-    hash_type: str = "md5",
-    file_type: str = "",
-    has_base: bool = True,
-    progress: bool = True,
+        url: str,
+        filepath: PathLike = "",
+        output_dir: PathLike = ".",
+        hash_val: Union[str, None] = None,
+        hash_type: str = "md5",
+        file_type: str = "",
+        has_base: bool = True,
+        progress: bool = True,
 ) -> None:
     """
     Download file from URL and extract it to the output directory.
